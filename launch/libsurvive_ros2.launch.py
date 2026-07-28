@@ -20,27 +20,42 @@
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
-
 import launch
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node
-from launch_ros.descriptions import ComposableNode
+from launch_ros.descriptions import ComposableNode, ParameterValue
 
 # Bag to save data
 BAG_FILE = os.path.join(launch.logging.launch_config.log_dir, 'libsurvive.bag')
 
-# Default libsurvive configuration file
-CFG_FILE = os.path.join(
-    get_package_share_directory('libsurvive_ros2'), 'config', 'config.json'
-)
+# Live libsurvive configuration and calibration file. This is deliberately the runtime path and
+# not the package share directory, which is overwritten on every image build.
+CFG_FILE = os.path.join(os.path.expanduser('~'), '.config', 'libsurvive', 'config.json')
+
+# Lowest BaseStationID on this rig, which anchors the world frame. A value of 0 makes libsurvive
+# pick the lowest id visible at startup, which moves if that base station is occluded.
+REFERENCE_BASESTATION = '302157013'
+
+# Lowest verbosity that emits the per-lighthouse OOTX statistics, including bad sync bits. Floods with data, only to be
+# used for debugging. -> 105
+# Verbostiy that emits per-device sync statistics and light statistics. -> 5
+VERBOSITY = '5'
 
 # Sow we don't have to repeat for composable and non-composable versions.
 PARAMETERS = [
-    {'driver_args': f'--force-recalibrate 1 -c {CFG_FILE}'},
+    {'driver_args': ParameterValue(
+        [
+            '-c ', LaunchConfiguration('config_file'),
+            ' -v ', LaunchConfiguration('verbosity'),
+            ' --reference-basestation ', LaunchConfiguration('reference_basestation'),
+            ' --globalscenesolver ', LaunchConfiguration('global_scene_solver'),
+            ' --force-calibrate ', LaunchConfiguration('force_calibrate'),
+            ' ', LaunchConfiguration('extra_driver_args'),
+        ],
+        value_type=str)},
     {'tracking_frame': 'libsurvive_world'},
     {'imu_topic': 'imu'},
     {'joy_topic': 'joy'},
@@ -59,7 +74,21 @@ def generate_launch_description():
         DeclareLaunchArgument('foxbridge', default_value='false',
                               description='Launch a foxglove bridge'),
         DeclareLaunchArgument('record', default_value='false',
-                              description='Record data with rosbag')]
+                              description='Record data with rosbag'),
+        DeclareLaunchArgument('config_file', default_value=CFG_FILE,
+                              description='libsurvive configuration and calibration file'),
+        DeclareLaunchArgument('verbosity', default_value=VERBOSITY,
+                              description='libsurvive verbosity; 105 or above logs OOTX stats'),
+        DeclareLaunchArgument('reference_basestation',
+                              default_value=REFERENCE_BASESTATION,
+                              description='BaseStationID anchoring the world frame, decimal or '
+                                          '0x-prefixed hex; 0 picks the lowest visible id'),
+        DeclareLaunchArgument('global_scene_solver', default_value='1',
+                              description='Re-solve lighthouse poses during the session'),
+        DeclareLaunchArgument('force_calibrate', default_value='0',
+                              description='Clear every lighthouse pose and recalibrate'),
+        DeclareLaunchArgument('extra_driver_args', default_value='',
+                              description='Extra libsurvive arguments, applied last')]
 
     # Non-composable launch (regular node)
     libsurvive_node = Node(

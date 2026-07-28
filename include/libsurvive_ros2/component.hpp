@@ -61,6 +61,7 @@ public:
 
 private:
   void work();
+  void check_reference_basestation();
   SurviveSimpleContext * actx_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::shared_ptr<tf2_ros::StaticTransformBroadcaster> tf_static_broadcaster_;
@@ -68,6 +69,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
   rclcpp::Publisher<diagnostic_msgs::msg::KeyValue>::SharedPtr cfg_publisher_;
   std::thread worker_thread_;
+  // Backing storage for the argv handed to libsurvive, which retains pointers into it.
+  std::vector<std::string> driver_tokens_;
+  rclcpp::TimerBase::SharedPtr reference_check_timer_;
   rclcpp::Time last_base_station_update_;
   std::string tracking_frame_;
   double lighthouse_period_;

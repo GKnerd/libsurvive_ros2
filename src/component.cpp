@@ -19,6 +19,8 @@
 // THE SOFTWARE.
 
 // C++ system
+#include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,9 +33,32 @@
 // Scale factor to move from G to m/s^2.
 constexpr double SI_GRAVITY = 9.80665;
 
+// Delay before checking the reference base station, to let the base stations be seen.
+constexpr double REFERENCE_CHECK_DELAY = 15.0;
+
 // We can only ever load one version of the driver, so we store a pointer to the instance of the
 // driver here, so the IMU callback can push data to it.
 libsurvive_ros2::Component * _singleton = nullptr;
+
+// Routes libsurvive's own logging into the ROS logger, so it is not split across two sinks.
+static void log_func(
+  SurviveSimpleContext * /*actx*/, SurviveLogLevel level, const char * msg)
+{
+  if (_singleton == nullptr) {
+    return;
+  }
+  switch (level) {
+    case SURVIVE_LOG_LEVEL_ERROR:
+      RCLCPP_ERROR(_singleton->get_logger(), "%s", msg);
+      break;
+    case SURVIVE_LOG_LEVEL_WARNING:
+      RCLCPP_WARN(_singleton->get_logger(), "%s", msg);
+      break;
+    default:
+      RCLCPP_INFO(_singleton->get_logger(), "%s", msg);
+      break;
+  }
+}
 
 static void imu_func(
   SurviveObject * so, int mask, const FLT * accelgyromag, uint32_t rawtime, int id)
@@ -107,21 +132,40 @@ Component::Component(const rclcpp::NodeOptions & options)
 
   // Setup driver parameters.
   std::string driver_args;
-  this->declare_parameter("driver_args", "--force-recalibrate 1");
+  this->declare_parameter("driver_args", "");
   this->get_parameter("driver_args", driver_args);
-  std::vector<const char *> args;
+  RCLCPP_INFO(this->get_logger(), "Driver arguments: '%s'", driver_args.c_str());
+
+  // libsurvive parses from argv[1], so a program name is prepended or the first token is lost.
+  // The tokens are owned by the node because libsurvive retains pointers into the argv it is
+  // given, and the pointers are only taken once the vector has stopped growing.
+  driver_tokens_.emplace_back("libsurvive_ros2");
   std::stringstream driver_ss(driver_args);
   std::string token;
   while (getline(driver_ss, token, ' ')) {
-    args.emplace_back(token.c_str());
+    if (!token.empty()) {
+      driver_tokens_.emplace_back(token);
+    }
+  }
+  std::vector<const char *> args;
+  args.reserve(driver_tokens_.size());
+  for (const std::string & driver_token : driver_tokens_) {
+    args.emplace_back(driver_token.c_str());
   }
 
   // Try and initialize survive with the arguments supplied.
-  actx_ = survive_simple_init(args.size(), const_cast<char **>(args.data()));
+  actx_ = survive_simple_init_with_logger(
+    args.size(), const_cast<char **>(args.data()), log_func);
   if (actx_ == nullptr) {
     RCLCPP_FATAL(this->get_logger(), "Could not initialize the libsurvive context");
     return;
   }
+
+  // libsurvive silently ignores a reference base station it cannot see, so check it once the
+  // base stations have had a chance to be seen.
+  reference_check_timer_ = this->create_wall_timer(
+    std::chrono::duration<double>(REFERENCE_CHECK_DELAY),
+    std::bind(&Component::check_reference_basestation, this));
 
   // Setup callback for reading IMU data.
   SurviveContext * ctx = survive_simple_get_ctx(actx_);
@@ -153,6 +197,25 @@ Component::~Component()
 rclcpp::Time Component::get_ros_time(const std::string & /*str*/, FLT timecode)
 {
   return rclcpp::Time() + rclcpp::Duration(std::chrono::duration<double>(timecode));
+}
+
+void Component::check_reference_basestation()
+{
+  reference_check_timer_->cancel();
+  SurviveContext * ctx = survive_simple_get_ctx(actx_);
+  uint32_t reference = survive_configi(ctx, "reference-basestation", SC_GET, 0);
+  if (reference == 0) {
+    return;
+  }
+  for (int lh = 0; lh < ctx->activeLighthouses; lh++) {
+    if (ctx->bsd[lh].OOTXSet && ctx->bsd[lh].BaseStationID == reference) {
+      return;
+    }
+  }
+  RCLCPP_ERROR(
+    this->get_logger(),
+    "reference-basestation %u (0x%08x) is not visible, so %s is anchored to an arbitrary base "
+    "station and will not reproduce across runs", reference, reference, tracking_frame_.c_str());
 }
 
 void Component::publish_imu(const sensor_msgs::msg::Imu & msg)
