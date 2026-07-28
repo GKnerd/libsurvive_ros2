@@ -82,14 +82,16 @@ Component::Component(const rclcpp::NodeOptions & options)
   // Global parameters
   this->declare_parameter("tracking_frame", "libsurvive_frame");
   this->get_parameter("tracking_frame", tracking_frame_);
-  this->declare_parameter("lighthouse_rate", 4.0);
-  this->get_parameter("lighthouse_rate", lighthouse_rate_);
+  this->declare_parameter("lighthouse_period", 4.0);
+  this->get_parameter("lighthouse_period", lighthouse_period_);
 
   // Setup topic for IMU.
   std::string imu_topic;
   this->declare_parameter("imu_topic", "imu");
   this->get_parameter("imu_topic", imu_topic);
-  imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(imu_topic, 10);
+  // Best-effort: this publishes from libsurvive's poll thread and must never block it.
+  imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
+    imu_topic, rclcpp::SensorDataQoS());
 
   // Setup topic for joystick.
   std::string joy_topic;
@@ -135,7 +137,9 @@ Component::Component(const rclcpp::NodeOptions & options)
 Component::~Component()
 {
   RCLCPP_INFO(this->get_logger(), "Cleaning up.");
-  worker_thread_.join();
+  if (worker_thread_.joinable()) {
+    worker_thread_.join();
+  }
 
   RCLCPP_INFO(this->get_logger(), "Shutting down libsurvive driver");
   if (actx_) {
@@ -250,7 +254,7 @@ void Component::work()
 
     // Always update the base stations
     auto time_now = this->get_clock()->now();
-    if (time_now.seconds() - last_base_station_update_.seconds() > lighthouse_rate_) {
+    if (time_now.seconds() - last_base_station_update_.seconds() > lighthouse_period_) {
       last_base_station_update_ = time_now;
       for (const SurviveSimpleObject * it = survive_simple_get_first_object(actx_); it != 0;
         it = survive_simple_get_next_object(actx_, it))
@@ -264,7 +268,14 @@ void Component::work()
             pose_msg.header.frame_id = tracking_frame_;
             pose_msg.child_frame_id = survive_simple_serial_number(it);
             ros_from_pose(&pose_msg.transform, pose);
-            tf_static_broadcaster_->sendTransform(pose_msg);
+            // /tf_static is latched, so only write when the pose actually changes.
+            auto published = published_lighthouses_.find(pose_msg.child_frame_id);
+            if (published == published_lighthouses_.end() ||
+              published->second != pose_msg.transform)
+            {
+              tf_static_broadcaster_->sendTransform(pose_msg);
+              published_lighthouses_[pose_msg.child_frame_id] = pose_msg.transform;
+            }
           }
         }
       }

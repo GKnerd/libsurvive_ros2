@@ -45,7 +45,7 @@ PARAMETERS = [
     {'imu_topic': 'imu'},
     {'joy_topic': 'joy'},
     {'cfg_topic': 'cfg'},
-    {'lighthouse_rate': 4.0}]
+    {'lighthouse_period': 4.0}]
 
 
 def generate_launch_description():
@@ -68,7 +68,7 @@ def generate_launch_description():
         name='libsurvive_ros2_node',
         namespace=LaunchConfiguration('namespace'),
         condition=UnlessCondition(LaunchConfiguration('composable')),
-        output='screen',
+        output='both',
         parameters=PARAMETERS)
 
     # Composable launch (zero-copy node example)

@@ -32,12 +32,14 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 // Other
 #include "diagnostic_msgs/msg/key_value.hpp"
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/transform.hpp"
 #include "libsurvive/survive_api.h"
 #include "libsurvive/survive.h"
 #include "rclcpp/rclcpp.hpp"
@@ -68,7 +70,9 @@ private:
   std::thread worker_thread_;
   rclcpp::Time last_base_station_update_;
   std::string tracking_frame_;
-  double lighthouse_rate_;
+  double lighthouse_period_;
+  // Last transform published per lighthouse, so /tf_static is only written on change.
+  std::unordered_map<std::string, geometry_msgs::msg::Transform> published_lighthouses_;
 };
 
 }  // namespace libsurvive_ros2
