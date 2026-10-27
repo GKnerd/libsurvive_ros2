@@ -27,7 +27,9 @@
 #include <os_generic.h>
 
 // C++ system
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,6 +63,7 @@ public:
 
 private:
   void work();
+  void publish_imu_loop();
   void check_reference_basestation();
   SurviveSimpleContext * actx_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -69,6 +72,12 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_publisher_;
   rclcpp::Publisher<diagnostic_msgs::msg::KeyValue>::SharedPtr cfg_publisher_;
   std::thread worker_thread_;
+  // IMU samples handed over from libsurvive's USB thread, which must never call into DDS.
+  std::thread imu_thread_;
+  std::mutex imu_mutex_;
+  std::condition_variable imu_cv_;
+  std::deque<sensor_msgs::msg::Imu> imu_queue_;
+  bool imu_running_ = true;
   // Backing storage for the argv handed to libsurvive, which retains pointers into it.
   std::vector<std::string> driver_tokens_;
   rclcpp::TimerBase::SharedPtr reference_check_timer_;

@@ -20,8 +20,10 @@
 
 // C++ system
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,9 @@
 
 // Scale factor to move from G to m/s^2.
 constexpr double SI_GRAVITY = 9.80665;
+
+// IMU samples held for publishing, about 0.3 s at 14 trackers. The oldest are dropped beyond it.
+constexpr size_t IMU_QUEUE_SIZE = 1000;
 
 // Delay before checking the reference base station, to let the base stations be seen.
 constexpr double REFERENCE_CHECK_DELAY = 15.0;
@@ -114,9 +119,10 @@ Component::Component(const rclcpp::NodeOptions & options)
   std::string imu_topic;
   this->declare_parameter("imu_topic", "imu");
   this->get_parameter("imu_topic", imu_topic);
-  // Best-effort: this publishes from libsurvive's poll thread and must never block it.
+  // Best-effort, so a slow subscriber never backs up the IMU thread.
   imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>(
     imu_topic, rclcpp::SensorDataQoS());
+  imu_thread_ = std::thread(&Component::publish_imu_loop, this);
 
   // Setup topic for joystick.
   std::string joy_topic;
@@ -190,6 +196,16 @@ Component::~Component()
     survive_simple_close(actx_);
   }
 
+  // libsurvive is closed, so imu_func can no longer enqueue samples.
+  {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    imu_running_ = false;
+  }
+  imu_cv_.notify_one();
+  if (imu_thread_.joinable()) {
+    imu_thread_.join();
+  }
+
   RCLCPP_INFO(this->get_logger(), "Clearing singleton instance");
   _singleton = nullptr;
 }
@@ -220,8 +236,30 @@ void Component::check_reference_basestation()
 
 void Component::publish_imu(const sensor_msgs::msg::Imu & msg)
 {
-  if (imu_publisher_) {
-    imu_publisher_->publish(msg);
+  // Called by libsurvive while it holds its context lock, so only enqueue here.
+  {
+    std::lock_guard<std::mutex> lock(imu_mutex_);
+    imu_queue_.push_back(msg);
+    if (imu_queue_.size() > IMU_QUEUE_SIZE) {
+      imu_queue_.pop_front();
+    }
+  }
+  imu_cv_.notify_one();
+}
+
+void Component::publish_imu_loop()
+{
+  std::deque<sensor_msgs::msg::Imu> batch;
+  std::unique_lock<std::mutex> lock(imu_mutex_);
+  while (imu_running_) {
+    imu_cv_.wait(lock, [this] {return !imu_queue_.empty() || !imu_running_;});
+    batch.swap(imu_queue_);
+    lock.unlock();
+    for (const sensor_msgs::msg::Imu & msg : batch) {
+      imu_publisher_->publish(msg);
+    }
+    batch.clear();
+    lock.lock();
   }
 }
 
@@ -229,12 +267,23 @@ void Component::work()
 {
   RCLCPP_INFO(this->get_logger(), "Start listening for events..");
 
-  // Poll for events.
+  // Poll for events. libsurvive keeps only the newest pose per tracker, so every pending event is
+  // handled before waiting again, and the poses collected meanwhile go out as one TF message.
   struct SurviveSimpleEvent event = {};
-  while (survive_simple_wait_for_event(
-      actx_,
-      &event) != SurviveSimpleEventType_Shutdown && rclcpp::ok())
-  {
+  std::vector<geometry_msgs::msg::TransformStamped> poses;
+  while (rclcpp::ok()) {
+    if (survive_simple_next_event(actx_, &event) == SurviveSimpleEventType_None) {
+      if (!poses.empty()) {
+        tf_broadcaster_->sendTransform(poses);
+        poses.clear();
+      }
+      if (!survive_simple_wait_for_update(actx_)) {
+        break;
+      }
+    } else if (event.event_type == SurviveSimpleEventType_Shutdown) {
+      break;
+    }
+
     // Business logic depends on the event type
     switch (event.event_type) {
       // TYPE: Pose update (limit to non-lighthouses only)
@@ -252,7 +301,7 @@ void Component::work()
               pose_msg.header.frame_id = tracking_frame_;
               pose_msg.child_frame_id = survive_simple_serial_number(pose_event->object);
               ros_from_pose(&pose_msg.transform, pose);
-              tf_broadcaster_->sendTransform(pose_msg);
+              poses.push_back(pose_msg);
             }
           }
           break;
