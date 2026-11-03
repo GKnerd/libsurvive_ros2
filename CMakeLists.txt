@@ -41,7 +41,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 include(ExternalProject)
 externalproject_add(libsurvive
   GIT_REPOSITORY https://github.com/collabora/libsurvive.git
-  GIT_TAG f23d298e6f0e69746eae1b7cf847e269d61e35f9
+  GIT_TAG ce6610f3e06b369d19a6b0b43f0b0e85b1181258
   CMAKE_ARGS
     -DCMAKE_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/libsurvive-install
     -DCMAKE_BUILD_TYPE=Release
